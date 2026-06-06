@@ -1,6 +1,4 @@
 import asyncio
-import hmac
-import hashlib
 import os
 from datetime import datetime, timezone, timedelta
 from contextlib import asynccontextmanager
@@ -18,17 +16,15 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-import httpx
 
 SUPABASE_URL = os.environ["SUPABASE_URL"]
 SUPABASE_KEY = os.environ["SUPABASE_KEY"]
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 OWNER_CHAT_ID = int(os.environ["OWNER_CHAT_ID"])
 WEBHOOK_SECRET = os.environ["WEBHOOK_SECRET"]
-BASE_URL = os.environ["BASE_URL"]
+BASE_URL = os.environ["BASE_URL"].rstrip("/")
 
 db: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
 telegram_app: Application = None
 user_state: dict = {}
 
@@ -36,27 +32,33 @@ user_state: dict = {}
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global telegram_app
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-    telegram_app.add_handler(CommandHandler("start", cmd_start))
-    telegram_app.add_handler(CallbackQueryHandler(handle_callback))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
-    await telegram_app.initialize()
-    await telegram_app.bot.set_webhook(
-        url=f"{BASE_URL}/webhook",
-        secret_token=WEBHOOK_SECRET,
-    )
-    await telegram_app.start()
+    try:
+        telegram_app = Application.builder().token(BOT_TOKEN).build()
+        telegram_app.add_handler(CommandHandler("start", cmd_start))
+        telegram_app.add_handler(CallbackQueryHandler(handle_callback))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+        await telegram_app.initialize()
+        await telegram_app.start()
+        try:
+            await telegram_app.bot.set_webhook(
+                url=f"{BASE_URL}/webhook",
+                secret_token=WEBHOOK_SECRET,
+            )
+            print(f"Webhook set to {BASE_URL}/webhook")
+        except Exception as e:
+            print(f"Webhook setup failed (non-fatal): {e}")
+    except Exception as e:
+        print(f"Startup error: {e}")
+        raise
     yield
-    await telegram_app.stop()
-    await telegram_app.shutdown()
+    try:
+        await telegram_app.stop()
+        await telegram_app.shutdown()
+    except Exception as e:
+        print(f"Shutdown error: {e}")
 
 
 fastapi_app = FastAPI(lifespan=lifespan)
-
-
-def auth_only_owner(chat_id: int):
-    if chat_id != OWNER_CHAT_ID:
-        raise HTTPException(status_code=403, detail="Forbidden")
 
 
 def fmt_time(ts_str: str) -> str:
@@ -135,30 +137,23 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if data == "menu:main":
         await main_menu(query)
-
     elif data == "menu:devices":
         await show_devices(query)
-
     elif data == "menu:unread":
         await show_unread(query)
-
     elif data == "menu:status":
         await show_status(query)
-
     elif data.startswith("device:"):
         device_id = data.split(":", 1)[1]
         await show_device_menu(query, device_id)
-
     elif data.startswith("dev_messages:"):
         parts = data.split(":")
         device_id = parts[1]
         offset = int(parts[2]) if len(parts) > 2 else 0
         await show_messages(query, device_id, offset)
-
     elif data.startswith("view_msg:"):
         msg_id = data.split(":", 1)[1]
         await view_message(query, msg_id)
-
     elif data.startswith("dev_search:"):
         device_id = data.split(":", 1)[1]
         user_state[query.from_user.id] = {"action": "search", "device_id": device_id}
@@ -168,13 +163,11 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [[InlineKeyboardButton("Back", callback_data=f"device:{device_id}")]]
             ),
         )
-
     elif data.startswith("search_result:"):
         parts = data.split(":")
         device_id = parts[1]
         msg_id = parts[2]
         await view_search_result(query, device_id, msg_id)
-
     elif data.startswith("dev_send:"):
         device_id = data.split(":", 1)[1]
         user_state[query.from_user.id] = {"action": "send_recipient", "device_id": device_id}
@@ -184,21 +177,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [[InlineKeyboardButton("Cancel", callback_data=f"device:{device_id}")]]
             ),
         )
-
     elif data.startswith("send_confirm:"):
         parts = data.split(":", 2)
         device_id = parts[1]
         queue_id = parts[2]
-        res = db.table("outbound_queue").update({"status": "confirmed"}).eq("id", queue_id).execute()
+        db.table("outbound_queue").update({"status": "confirmed"}).eq("id", queue_id).execute()
         await query.edit_message_text("SMS queued for sending.")
-
     elif data.startswith("send_cancel:"):
         parts = data.split(":", 2)
         device_id = parts[1]
         queue_id = parts[2]
         db.table("outbound_queue").delete().eq("id", queue_id).execute()
         await show_device_menu(query, device_id)
-
     elif data.startswith("dev_rename:"):
         device_id = data.split(":", 1)[1]
         user_state[query.from_user.id] = {"action": "rename", "device_id": device_id}
@@ -371,8 +361,10 @@ async def show_status(query):
             f"  Battery: {battery}  |  {charging}\n"
             f"  Network: {network}\n"
         )
-    keyboard = [[InlineKeyboardButton("Refresh", callback_data="menu:status")],
-                [InlineKeyboardButton("Back", callback_data="menu:main")]]
+    keyboard = [
+        [InlineKeyboardButton("Refresh", callback_data="menu:status")],
+        [InlineKeyboardButton("Back", callback_data="menu:main")],
+    ]
     await query.edit_message_text(
         "\n".join(lines),
         reply_markup=InlineKeyboardMarkup(keyboard),
